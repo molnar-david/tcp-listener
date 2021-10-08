@@ -1,4 +1,4 @@
-# tcp-listener-single-client
+# tcp-listener
 
 A very basic TCP server class that ~~accepts a single client~~ can now accept multiple clients! Implemented using [Windows Sockets 2](https://docs.microsoft.com/en-us/windows/win32/winsock/windows-sockets-start-page-2).  
 A sample main.cpp file is included to illustrate how it can be used.  
