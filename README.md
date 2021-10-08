@@ -1,4 +1,4 @@
-# tcp-listener
+# tcp-listener-single-client
 
 A very basic TCP server class that accepts a single client, implemented using Windows Sockets 2.  
 A sample main.cpp file is included to illustrate how it can be used.  
