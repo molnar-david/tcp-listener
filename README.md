@@ -5,7 +5,7 @@ A sample main.cpp file is included to illustrate how it can be used.
 
 Similar to [tcp-server](https://github.com/molnar-david/tcp-server), but abstracted into a class form to make it more portable and flexible.
 
-## note
+## Note
 
 You can customize it to your own liking by making a subclass from it, and implementing the three virtual functions (onClientConnected, onClientDisconnected and onMessageReceived).
 
