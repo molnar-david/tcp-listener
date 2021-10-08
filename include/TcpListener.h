@@ -1,47 +1,46 @@
 #pragma once
 
-#include <WS2tcpip.h>					// Header file for  WinSock functions
+#include <WS2tcpip.h>
 
-#include <string>
-
-#pragma comment(lib, "ws2_32.lib")		// WinSock library file
-
-#define MAX_BUFFER_SIZE 4096
-
-// Forward declaration
-class TcpListener;
-
-// Callback to data received
-using MessageReceivedHandler = void(*)(TcpListener* listener, int socketId, std::string msg);
+#pragma comment (lib, "ws2_32.lib")
 
 class TcpListener
 {
 private:
-	std::string				m_IpAddress;
-	int						m_port;
-	MessageReceivedHandler	MessageReceived;
+	const char* m_ipAddress;	// IP address the server will run on
+	int				m_port;			// Port # for the web service
+	int				m_socket;		// Internal file descriptor for the listening 
+	bool			m_running;		// Bool that controls and tells us whether the server is running or not
+	fd_set			m_master;		// Master file descriptor set
+
+protected:
+	// Handler for client connections
+	virtual void onClientConnected(int clientSocket);
+
+	// Handler for client disconnections
+	virtual void onClientDisconnected(int clientSocket);
+
+	// Handler for when a message is received from the client
+	virtual void onMessageReceived(int clientSocket, const char* msg, int length);
+
+	// Send a message to a client
+	void sendToClient(int clientSocket, const char* msg, int length);
+
+	// Broadcast a message from a client
+	void broadcastToClients(int sendingClient, const char* msg, int length);
 
 public:
-	TcpListener(std::string ipAddress, int port, MessageReceivedHandler handler);
+	TcpListener(const char* ipAddress, int port);
 
-	~TcpListener();
+	// Initialize the listener
+	int init();
 
-	// Initialize WinSock
-	bool Init();
+	// Run the listener
+	int run();
 
-	// main processing loop
-	void Run();
+	// Shut the listener down
+	void shutdown();
 
-	// Send a message to the specified client
-	void Send(int clientSocket, std::string msg);
-
-	// Cleanup
-	void Cleanup();
-
-private:
-	// Create a socket
-	SOCKET CreateSocket();
-
-	// Wait for a connection
-	SOCKET WaitForConnection(SOCKET listening);
+	bool getRunning() const { return m_running; }
+	void setRunning(bool b) { m_running = b; }
 };

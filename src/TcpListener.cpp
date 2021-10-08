@@ -1,134 +1,198 @@
 #include "TcpListener.h"
 
 #include <iostream>
+#include <string>
 
-TcpListener::TcpListener(std::string ipAddress, int port, MessageReceivedHandler handler)
-	: m_IpAddress{ ipAddress }, m_port{ port }, MessageReceived{ handler }
+#define MAX_BUFFER_SIZE 4096
+
+TcpListener::TcpListener(const char* ipAddress, int port)
+	: m_ipAddress(ipAddress), m_port(port), m_running(false)
 {
 }
 
-TcpListener::~TcpListener()
+// Initialize the listener
+int TcpListener::init()
 {
-	Cleanup();
-}
-
-// Initialize WinSock
-bool TcpListener::Init()
-{
-	WSAData data;
+	// Initialize WinSock
+	WSADATA wsData{};
 	WORD ver{ MAKEWORD(2, 2) };
 
-	int wsInit({ WSAStartup(ver, &data) });
-	if (wsInit != 0)
+	int ret{ WSAStartup(ver, &wsData) };
+	if (ret != 0)
 	{
-		std::cerr << "Can't initialize WinSock! Error: " << wsInit << '\n';
+		return ret;
 	}
 
-	return wsInit == 0;
+	// Create a socket
+	m_socket = socket(AF_INET, SOCK_STREAM, 0);
+	if (m_socket == INVALID_SOCKET)
+	{
+		return WSAGetLastError();
+	}
+
+	// Bind the ip address and port to a socke
+	sockaddr_in hint{};
+	hint.sin_family = AF_INET;
+	hint.sin_port = htons(m_port);			// host to network short
+	inet_pton(AF_INET, m_ipAddress, &hint.sin_addr);
+
+	ret = bind(m_socket, (sockaddr*)&hint, sizeof(hint));
+	if (ret == SOCKET_ERROR)
+	{
+		return WSAGetLastError();
+	}
+
+	// Tell WinSock the socket is for listening
+	ret = listen(m_socket, SOMAXCONN);
+	if (ret == SOCKET_ERROR)
+	{
+		return WSAGetLastError();
+	}
+
+	// Create the master file descriptor set and zero it
+	FD_ZERO(&m_master);
+
+	// Add our listening socket to the set
+	FD_SET(m_socket, &m_master);
+
+	return 0;
 }
 
-// main processing loop
-void TcpListener::Run()
+// Run the listener
+int TcpListener::run()
 {
-	// Create a listening socket
-	SOCKET listening{ CreateSocket() };
-	if (listening == INVALID_SOCKET)
+	m_running = true;
+	while (m_running)
 	{
-		return;
-	}
+		// The call to select is destructive - the copy will only contain the sockets
+		// that are accepting inbound connection requests or messages, so we'll need a copy!
+		fd_set copy{ m_master };
 
-	// Wait for a connection
-	SOCKET client{ WaitForConnection(listening) };
-	if (client == INVALID_SOCKET)
-	{
-		return;
-	}
-
-	// Loop receive / send
-	closesocket(listening);
-
-	char buf[MAX_BUFFER_SIZE];
-	while (true)
-	{
-		int bytesReceived{ recv(client, buf, MAX_BUFFER_SIZE, 0) };
-		if (bytesReceived == SOCKET_ERROR)
+		int socketCount{ select(0, &copy, nullptr, nullptr, nullptr) };
+		if (socketCount == SOCKET_ERROR)
 		{
-			std::cerr << "Can't read from client! Error: " << WSAGetLastError() << '\n';
 			break;
 		}
 
-		if (bytesReceived == 0)
+		for (int i{ 0 }; i < socketCount && m_running; ++i)
 		{
-			std::cout << "Client disconnected!\n";
-			break;
-		}
+			SOCKET sock{ copy.fd_array[i] };
 
-		if (MessageReceived == NULL)
-		{
-			std::cerr << "No MessageReceivedHandler found! Quitting ... \n";
-			break;
-		}
+			// Is it an inbound communication?
+			if (sock == m_socket)
+			{
+				// Accept a new connection
+				SOCKET client{ accept(m_socket, nullptr, nullptr) };
+				if (client == INVALID_SOCKET)
+				{
+					continue;
+				}
 
-		MessageReceived(this, client, std::string(buf, 0, bytesReceived));
+				// Add the new connection to the list of connected clients
+				FD_SET(client, &m_master);
+
+				// Send a welcome message to the client
+				onClientConnected(client);
+			}
+			else	// It's an inbound message
+			{
+				// Receive message
+				char buf[MAX_BUFFER_SIZE]{};
+				int bytesReceived{ recv(sock, buf, MAX_BUFFER_SIZE, 0) };
+
+				// Client disconnects
+				if (bytesReceived <= 0)
+				{
+					onClientDisconnected(sock);
+
+					// Drop the client
+					closesocket(sock);
+					FD_CLR(sock, &m_master);
+					continue;
+				}
+
+				onMessageReceived(sock, buf, bytesReceived);
+			}
+		}
 	}
 
-	closesocket(client);
+	shutdown();
+
+	return 0;
 }
 
-// Send a message to the specified client
-void TcpListener::Send(int clientSocket, std::string msg)
+// Shut the listener down
+void TcpListener::shutdown()
 {
-	send(clientSocket, msg.c_str(), msg.size(), 0);
-}
+	// Close the listening socket
+	closesocket(m_socket);
+	FD_CLR(m_socket, &m_master);
+	std::cout << "Server shut down\n";
 
-// Cleanup
-void TcpListener::Cleanup()
-{
+	std::string msg{ "Server is shutting down. Goodbye ...\r\n" };
+
+	// Close open client sockets
+	while (m_master.fd_count > 0)
+	{
+		SOCKET sock{ m_master.fd_array[0] };
+
+		// Inform client about the server shutting down
+		sendToClient(sock, msg.c_str(), msg.size());
+
+		// Close the client socket, remove it from master set
+		closesocket(sock);
+		FD_CLR(sock, &m_master);
+	}
+
+	// Cleanup WinSock
 	WSACleanup();
 }
 
-// Create a socket
-SOCKET TcpListener::CreateSocket()
+// Handler for client connections
+void TcpListener::onClientConnected(int clientSocket)
 {
-	SOCKET listening{ socket(AF_INET, SOCK_STREAM, 0) };
-	if (listening == INVALID_SOCKET)
-	{
-		std::cerr << "Can't create socket! Error: " << WSAGetLastError() << '\n';
-		return INVALID_SOCKET;
-	}
 
-	sockaddr_in hint{};
-	hint.sin_family = AF_INET;
-	hint.sin_port = htons(m_port);
-	inet_pton(AF_INET, m_IpAddress.c_str(), &hint.sin_addr);
-
-	int bindOk{ bind(listening, (sockaddr*)&hint, sizeof(hint)) };
-	if (bindOk == SOCKET_ERROR)
-	{
-		std::cerr << "Can't bind socket! Error: " << WSAGetLastError() << '\n';
-		closesocket(listening);
-		return INVALID_SOCKET;
-	}
-
-	int listenOk{ listen(listening, SOMAXCONN) };
-	if (listenOk == SOCKET_ERROR)
-	{
-		std::cerr << "Can't listen on socket! Error: " << WSAGetLastError() << '\n';
-		closesocket(listening);
-		return INVALID_SOCKET;
-	}
-
-	return listening;
 }
 
-// Wait for a connection
-SOCKET TcpListener::WaitForConnection(SOCKET listening)
+// Handler for client disconnections
+void TcpListener::onClientDisconnected(int clientSocket)
 {
-	SOCKET client{ accept(listening, NULL, NULL) };
-	if (client == INVALID_SOCKET)
-	{
-		std::cerr << "Can't accept client! Error: " << WSAGetLastError() << '\n';
-	}
 
-	return client;
+}
+
+// Handler for when a message is received from the client
+void TcpListener::onMessageReceived(int clientSocket, const char* msg, int length)
+{
+	// Is the message a command?
+	if (msg[0] == '\\')
+	{
+		std::string cmd{ std::string(msg, length) };
+
+		// Quit the server
+		if (cmd == "\\quit")
+		{
+			setRunning(false);
+		}
+
+		// Unknown command - continue
+	}
+}
+
+// Send a message to a client
+void TcpListener::sendToClient(int clientSocket, const char* msg, int length)
+{
+	send(clientSocket, msg, length, 0);
+}
+
+// Broadcast a message from a client
+void TcpListener::broadcastToClients(int sendingClient, const char* msg, int length)
+{
+	for (int i{ 0 }; i < m_master.fd_count; ++i)
+	{
+		SOCKET outSock{ m_master.fd_array[i] };
+		if (outSock != m_socket && outSock != sendingClient)
+		{
+			sendToClient(outSock, msg, length);
+		}
+	}
 }
